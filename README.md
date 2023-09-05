@@ -1,4 +1,4 @@
-telemetry - A collection of telemetry / logging Go modules
+A collection of telemetry Go modules
 ===========
 [![Github Release](https://img.shields.io/github/release/els0r/telemetry.svg)](https://github.com/els0r/telemetry/releases)
 [![Build/Test Status](https://github.com/els0r/telemetry/workflows/Go/badge.svg)](https://github.com/els0r/telemetry/actions?query=workflow%3AGo)
@@ -6,7 +6,7 @@ telemetry - A collection of telemetry / logging Go modules
 
 This package contains the following Go modules:
 
-[logging](https://github.com/els0r/telemetry/logging) - A module providing convenience wrappers for `log/slog`\
+[logging](./logging) - A module providing convenience wrappers for [log/slog](https://pkg.go.dev/log/slog)\
 [![GoDoc](https://godoc.org/github.com/fels0r/telemetry/logging?status.svg)](https://godoc.org/github.com/els0r/telemetry/logging/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/els0r/telemetry/logging)](https://goreportcard.com/report/github.com/els0r/telemetry/logging)
 
