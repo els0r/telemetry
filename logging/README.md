@@ -10,7 +10,7 @@ This module wraps the Go standard library logger [log/slog](https://pkg.go.dev/l
 - Support for format-based output (such as `Infof(...)`)
 - Support for various (extensible) output encodings (`console`, `logfmt`, `JSON`, ...)
 - Extension of standard logging levels by `Fatal[f](...)` and `Panic[f](...)` logging events (triggering the respective actions)
-- Performance-oriented approach to log level handling
+- Performance-oriented approach to log level handling / filtering
 
 ## Installation
 ```bash
@@ -42,13 +42,13 @@ if err != nil {
 	// Handle error, e.g. abort
 }
 ```
-Enrich an exising context / logger in a function / method (labels set in parent context are present):
+Enrich an existing context / logger in a function / method (labels set in parent context are present):
 ```Go
 func handle(ctx context.Context, iface string) {
 	ctx = logging.WithFields(ctx, slog.String("iface", iface))
 	logger := logging.FromContext(ctx)
 
-    logging.FromContext(ctx).Info("performing action") // will throw [... iface=XYZ] and all labels from parent context
+    logging.FromContext(ctx).Info("performing action") // will add [... iface=XYZ] and all labels from parent context
 
     // ...
 }
