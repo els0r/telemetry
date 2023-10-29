@@ -1,4 +1,4 @@
-module public/telemetry/metrics
+module github.com/els0r/telemetry/metrics
 
 go 1.21
 
