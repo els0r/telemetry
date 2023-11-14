@@ -26,7 +26,7 @@ const (
 	TracingKey = "tracing"
 
 	TracingEnabledArg     string = TracingKey + ".enabled"
-	TracingEnabledDefault bool   = true
+	TracingEnabledDefault bool   = false
 	TracingEnabledHelp    string = "enable tracing"
 
 	TracingCollectorKey string = TracingKey + ".collector"

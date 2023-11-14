@@ -8,6 +8,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -35,11 +36,16 @@ type tracingConfig struct {
 // Option allows to configure the tracing setup
 type Option func(*tracingConfig) error
 
+var (
+	errorNoCollector    = errors.New("no collector endpoint set")
+	errorNoSpanExporter = errors.New("no span exporter set")
+)
+
 // WithGRPCExporter sets up an exporter using a gRPC connection to the trace collector
 func WithGRPCExporter(ctx context.Context, collectorEndpoint string) Option {
 	return func(tc *tracingConfig) error {
 		if collectorEndpoint == "" {
-			return fmt.Errorf("no collector endpoint set")
+			return errorNoCollector
 		}
 		// If the OpenTelemetry Collector is running on a local cluster (minikube or
 		// microk8s), it should be accessible through the NodePort service at the
@@ -133,7 +139,7 @@ func NewTracerProvider(opts ...Option) (tp *sdktrace.TracerProvider, err error) 
 	}
 	exporter := tracingCfg.exporter
 	if exporter == nil {
-		return nil, fmt.Errorf("no span exporter set")
+		return nil, errorNoSpanExporter
 	}
 
 	if err != nil {
