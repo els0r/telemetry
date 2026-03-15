@@ -60,11 +60,10 @@ func ContextFromW3CTraceparentHeader(ctx context.Context, traceparentHeader stri
 	}
 
 	if traceparentHeader == "" {
-		return context.Background()
+		return ctx
 	}
 
 	p := propagation.TraceContext{}
-	otel.SetTextMapPropagator(p)
 
 	return p.Extract(ctx,
 		propagation.MapCarrier{w3traceparentHeaderKey: traceparentHeader},
@@ -79,11 +78,10 @@ func ContextFromB3SingleHeader(ctx context.Context, b3Header string) context.Con
 	}
 
 	if b3Header == "" {
-		return context.Background()
+		return ctx
 	}
 
 	p := b3.New(b3.WithInjectEncoding(b3.B3MultipleHeader | b3.B3SingleHeader))
-	otel.SetTextMapPropagator(p)
 
 	return p.Extract(ctx, propagation.MapCarrier{b3SingleHeaderKey: b3Header})
 }
@@ -134,7 +132,7 @@ func GetSpanID(ctx context.Context) (spanID string) {
 		return spanID
 	}
 	sc := trace.SpanContextFromContext(ctx)
-	if sc.HasTraceID() {
+	if sc.IsValid() {
 		return sc.SpanID().String()
 	}
 	return spanID
