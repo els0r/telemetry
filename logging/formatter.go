@@ -46,9 +46,7 @@ func (f *formatter) Debug(args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// Debugf allows writing of formatted debug messages to the logger.
-//
-// Deprecated: Use DebugContext with structured attributes instead.
+// Debugf allows writing of formatted debug messages to the logger
 func (f *formatter) Debugf(format string, args ...interface{}) {
 	if !f.l.Enabled(enableCtx, slog.LevelDebug) {
 		return
@@ -57,7 +55,14 @@ func (f *formatter) Debugf(format string, args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// DebugContext emits a debug message with context and structured attributes
+// DebugContext emits a debug message, passing ctx through to the handler chain.
+// This enables context-aware handler middleware (e.g., trace ID injection) to read
+// from the context. Use with FromContext for the full pattern:
+//
+//	logging.FromContext(ctx).DebugContext(ctx, "msg", slog.String("key", "val"))
+//
+// The attrs parameter allows attaching per-call structured fields without a
+// separate .With() allocation.
 func (f *formatter) DebugContext(ctx context.Context, msg string, attrs ...slog.Attr) {
 	if !f.l.Enabled(ctx, slog.LevelDebug) {
 		return
@@ -76,9 +81,7 @@ func (f *formatter) Info(args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// Infof allows writing of formatted info messages to the logger.
-//
-// Deprecated: Use InfoContext with structured attributes instead.
+// Infof allows writing of formatted info messages to the logger
 func (f *formatter) Infof(format string, args ...interface{}) {
 	if !f.l.Enabled(enableCtx, slog.LevelInfo) {
 		return
@@ -87,7 +90,14 @@ func (f *formatter) Infof(format string, args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// InfoContext emits an info message with context and structured attributes
+// InfoContext emits an info message, passing ctx through to the handler chain.
+// This enables context-aware handler middleware (e.g., trace ID injection) to read
+// from the context. Use with FromContext for the full pattern:
+//
+//	logging.FromContext(ctx).InfoContext(ctx, "msg", slog.String("key", "val"))
+//
+// The attrs parameter allows attaching per-call structured fields without a
+// separate .With() allocation.
 func (f *formatter) InfoContext(ctx context.Context, msg string, attrs ...slog.Attr) {
 	if !f.l.Enabled(ctx, slog.LevelInfo) {
 		return
@@ -106,9 +116,7 @@ func (f *formatter) Warn(args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// Warnf allows writing of formatted warning messages to the logger.
-//
-// Deprecated: Use WarnContext with structured attributes instead.
+// Warnf allows writing of formatted warning messages to the logger
 func (f *formatter) Warnf(format string, args ...interface{}) {
 	if !f.l.Enabled(enableCtx, slog.LevelWarn) {
 		return
@@ -117,7 +125,8 @@ func (f *formatter) Warnf(format string, args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// WarnContext emits a warn message with context and structured attributes
+// WarnContext emits a warn message, passing ctx through to the handler chain.
+// See InfoContext for usage pattern and rationale.
 func (f *formatter) WarnContext(ctx context.Context, msg string, attrs ...slog.Attr) {
 	if !f.l.Enabled(ctx, slog.LevelWarn) {
 		return
@@ -136,11 +145,9 @@ func (f *formatter) Error(args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// Errorf allows writing of formatted error messages to the logger. It's variadic
+// Errorf allows writing of formatted error messages to the logger. Its variadic
 // arguments will _not_ add key-value pairs to the message, but be used
-// as part of the msg's format string.
-//
-// Deprecated: Use ErrorContext with structured attributes instead.
+// as part of the msg's format string
 func (f *formatter) Errorf(format string, args ...interface{}) {
 	if !f.l.Enabled(enableCtx, slog.LevelError) {
 		return
@@ -149,7 +156,8 @@ func (f *formatter) Errorf(format string, args ...interface{}) {
 	_ = f.l.Handler().Handle(enableCtx, r)
 }
 
-// ErrorContext emits an error message with context and structured attributes
+// ErrorContext emits an error message, passing ctx through to the handler chain.
+// See InfoContext for usage pattern and rationale.
 func (f *formatter) ErrorContext(ctx context.Context, msg string, attrs ...slog.Attr) {
 	if !f.l.Enabled(ctx, slog.LevelError) {
 		return
@@ -169,9 +177,7 @@ func (f *formatter) Fatal(args ...interface{}) {
 	f.exiter.Exit(1)
 }
 
-// Fatalf will emit a formatted log message with level fatal and exit with a non-zero exit code.
-//
-// Deprecated: Use FatalContext with structured attributes instead.
+// Fatalf will emit a formatted log message with level fatal and exit with a non-zero exit code
 func (f *formatter) Fatalf(format string, args ...interface{}) {
 	if !f.l.Enabled(enableCtx, LevelFatal) {
 		return
@@ -181,7 +187,8 @@ func (f *formatter) Fatalf(format string, args ...interface{}) {
 	f.exiter.Exit(1)
 }
 
-// FatalContext emits a fatal message with context and structured attributes, then exits
+// FatalContext emits a fatal message, passing ctx through to the handler chain, then exits.
+// See InfoContext for usage pattern and rationale.
 func (f *formatter) FatalContext(ctx context.Context, msg string, attrs ...slog.Attr) {
 	if !f.l.Enabled(ctx, LevelFatal) {
 		return
@@ -204,9 +211,7 @@ func (f *formatter) Panic(args ...interface{}) {
 	f.panicker.Panic(msg)
 }
 
-// Panicf will emit a formatted log message with level panic and panic.
-//
-// Deprecated: Use PanicContext with structured attributes instead.
+// Panicf will emit a formatted log message with level panic and panic
 func (f *formatter) Panicf(format string, args ...interface{}) {
 	if !f.l.Enabled(enableCtx, LevelPanic) {
 		return
@@ -218,7 +223,8 @@ func (f *formatter) Panicf(format string, args ...interface{}) {
 	f.panicker.Panic(msg)
 }
 
-// PanicContext emits a panic message with context and structured attributes, then panics
+// PanicContext emits a panic message, passing ctx through to the handler chain, then panics.
+// See InfoContext for usage pattern and rationale.
 func (f *formatter) PanicContext(ctx context.Context, msg string, attrs ...slog.Attr) {
 	if !f.l.Enabled(ctx, LevelPanic) {
 		return
