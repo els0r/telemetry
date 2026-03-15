@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	instrumentationCodeProviderName = "github.com/els0r/goProbe/pkg/tracing"
+	instrumentationCodeProviderName = "github.com/els0r/telemetry/tracing"
 )
 
 type tracingConfig struct {
@@ -142,9 +142,6 @@ func NewTracerProvider(opts ...Option) (tp *sdktrace.TracerProvider, err error) 
 		return nil, errorNoSpanExporter
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to create resource: %w", err)
-	}
 	// Register the trace exporter with a TracerProvider, using a batch
 	// span processor to aggregate spans before export.
 	bsp := sdktrace.NewBatchSpanProcessor(exporter)

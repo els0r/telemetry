@@ -118,7 +118,7 @@ func (p *Prometheus) newMetrics(serviceName, subsystem string, additionalMetrics
 			Namespace: serviceName,
 			Subsystem: subsystem,
 			Name:      "response_size_bytes",
-			Help:      "HTTP reponse sizes in bytes",
+			Help:      "HTTP response sizes in bytes",
 		},
 	)
 	p.additionalMetrics = additionalMetrics
@@ -136,7 +136,6 @@ func (p *Prometheus) registerMetrics() {
 	toRegister = append(toRegister, p.additionalMetrics...)
 
 	for _, collector := range toRegister {
-		collector := collector
 		prometheus.MustRegister(collector)
 	}
 }
