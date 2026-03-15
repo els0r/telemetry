@@ -23,17 +23,17 @@ type testLogger struct {
 
 func (tl *testLogger) Write(data []byte) (n int, err error) {
 	tl.t.Log(strings.TrimRight(string(data), string('\n')))
-	return n, err
+	return len(data), nil
 }
 
 func TestInitialization(t *testing.T) {
 	t.Run("unknown level", func(t *testing.T) {
-		err := Init(LevelFromString("kittens"), EncodingJSON)
+		_, err := Init(LevelFromString("kittens"), EncodingJSON)
 		require.NotNil(t, err)
 	})
 
 	t.Run("unknown encoding", func(t *testing.T) {
-		err := Init(LevelDebug, Encoding("windings"))
+		_, err := Init(LevelDebug, Encoding("windings"))
 		require.NotNil(t, err)
 	})
 }
@@ -54,8 +54,11 @@ func TestFileOutputOption(t *testing.T) {
 	for i, test := range tests {
 		test := test
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			_, err := New(LevelDebug, EncodingLogfmt, WithFileOutput(test.in))
+			_, shutdown, err := New(LevelDebug, EncodingLogfmt, WithFileOutput(test.in))
 			require.ErrorIs(t, test.expectedError, err)
+			if shutdown != nil {
+				_ = shutdown()
+			}
 			if test.clean {
 				require.Nil(t, os.RemoveAll(test.in))
 			}
@@ -63,8 +66,18 @@ func TestFileOutputOption(t *testing.T) {
 	}
 }
 
+func TestFileOutputShutdown(t *testing.T) {
+	tmpFile := t.TempDir() + "/test.log"
+	_, shutdown, err := New(LevelDebug, EncodingLogfmt, WithFileOutput(tmpFile))
+	require.Nil(t, err)
+	require.NotNil(t, shutdown)
+
+	// shutdown should close the file without error
+	require.Nil(t, shutdown())
+}
+
 func TestBogusInput(t *testing.T) {
-	_, err := NewFromContext(context.Background(), 42, Encoding("00000000000llllllllll"))
+	_, _, err := NewFromContext(context.Background(), 42, Encoding("00000000000llllllllll"))
 	require.NotNil(t, err)
 }
 
@@ -72,17 +85,22 @@ func TestNewPlainLogger(t *testing.T) {
 	buf := &bytes.Buffer{}
 	buf2 := &bytes.Buffer{}
 
-	logger, err := NewFromContext(context.Background(), LevelInfo, EncodingPlain,
+	logger, _, err := NewFromContext(context.Background(), LevelInfo, EncodingPlain,
 		WithOutput(buf),
 		WithErrorOutput(buf2),
 	)
 	require.Nil(t, err)
 
-	logger.WithGroup("nothing").With(slog.String("else", "matters")).Info("hello world")
-	require.Equal(t, "Hello world\n", buf.String())
+	// plain handler now prints attributes
+	logger.WithGroup("grp").With(slog.String("else", "matters")).Info("hello world")
+	require.Contains(t, buf.String(), "Hello world")
+	require.Contains(t, buf.String(), "else=matters")
 
-	logger.WithGroup("nothing").With(slog.String("else", "matters")).Error("hello error")
-	require.Equal(t, "Hello error\n", buf2.String())
+	buf.Reset()
+
+	logger.WithGroup("grp").With(slog.String("else", "matters")).Error("hello error")
+	require.Contains(t, buf2.String(), "Hello error")
+	require.Contains(t, buf2.String(), "else=matters")
 
 	buf.Reset()
 
@@ -95,8 +113,17 @@ func TestNewPlainLogger(t *testing.T) {
 	require.Equal(t, "", buf.String())
 }
 
+func TestPlainHandlerWithAttrs(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger, _, err := New(LevelInfo, EncodingPlain, WithOutput(buf))
+	require.Nil(t, err)
+
+	logger.With("key", "val").Info("test message")
+	require.Contains(t, buf.String(), "key=val")
+}
+
 func TestLogConcurrent(t *testing.T) {
-	err := Init(LevelFromString("debug"), EncodingLogfmt, WithOutput(&testLogger{t}))
+	_, err := Init(LevelFromString("debug"), EncodingLogfmt, WithOutput(&testLogger{t}))
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -143,7 +170,7 @@ func (m mockPanicker) Panic(msg string) {
 }
 
 func TestCaller(t *testing.T) {
-	err := Init(LevelFromString("warn"), EncodingLogfmt,
+	_, err := Init(LevelFromString("warn"), EncodingLogfmt,
 		WithOutput(&testLogger{t}),
 		WithCaller(true),
 		WithName("testing"),
@@ -168,9 +195,9 @@ type lineCounterOutput struct {
 }
 
 // Write implements the io.Writer interface
-func (l *lineCounterOutput) Write(_ []byte) (n int, err error) {
+func (l *lineCounterOutput) Write(data []byte) (n int, err error) {
 	l.lines++
-	return n, err
+	return len(data), nil
 }
 
 func TestLevelSplitHandler(t *testing.T) {
@@ -178,7 +205,7 @@ func TestLevelSplitHandler(t *testing.T) {
 		lcostd := &lineCounterOutput{}
 		lcoerrs := &lineCounterOutput{}
 
-		err := Init(LevelFromString("debug"), EncodingJSON,
+		_, err := Init(LevelFromString("debug"), EncodingJSON,
 			WithOutput(lcostd),
 			WithErrorOutput(lcoerrs),
 		)
@@ -195,7 +222,7 @@ func TestLevelSplitHandler(t *testing.T) {
 
 	t.Run("check split output visually", func(t *testing.T) {
 		// re-initialize so messages can be visually inspected with -v
-		err := Init(LevelFromString("debug"), EncodingLogfmt,
+		_, err := Init(LevelFromString("debug"), EncodingLogfmt,
 			WithName("test"),
 			WithVersion("snapshot"),
 			// tests the WithGroup/WithAttr from the callerHandler
@@ -214,7 +241,7 @@ func TestLevelSplitHandler(t *testing.T) {
 func TestDebug(t *testing.T) {
 	lco := &lineCounterOutput{}
 
-	err := Init(LevelFromString("debug"), EncodingJSON, WithOutput(lco))
+	_, err := Init(LevelFromString("debug"), EncodingJSON, WithOutput(lco))
 	require.Nil(t, err)
 
 	logger := Logger()
@@ -227,7 +254,7 @@ func TestDebug(t *testing.T) {
 func TestInfo(t *testing.T) {
 	lco := &lineCounterOutput{}
 
-	err := Init(LevelFromString("info"), EncodingJSON, WithOutput(lco))
+	_, err := Init(LevelFromString("info"), EncodingJSON, WithOutput(lco))
 	require.Nil(t, err)
 
 	logger := Logger()
@@ -242,7 +269,7 @@ func TestInfo(t *testing.T) {
 func TestWarn(t *testing.T) {
 	lco := &lineCounterOutput{}
 
-	err := Init(LevelFromString("warn"), EncodingJSON, WithOutput(lco))
+	_, err := Init(LevelFromString("warn"), EncodingJSON, WithOutput(lco))
 	require.Nil(t, err)
 
 	logger := Logger()
@@ -259,7 +286,7 @@ func TestWarn(t *testing.T) {
 func TestError(t *testing.T) {
 	lco := &lineCounterOutput{}
 
-	err := Init(LevelFromString("error"), EncodingJSON, WithOutput(lco))
+	_, err := Init(LevelFromString("error"), EncodingJSON, WithOutput(lco))
 	require.Nil(t, err)
 
 	logger := Logger()
@@ -278,7 +305,7 @@ func TestError(t *testing.T) {
 func TestFatal(t *testing.T) {
 	lco := &lineCounterOutput{}
 
-	err := Init(LevelFromString("fatal"), EncodingJSON, WithOutput(lco))
+	_, err := Init(LevelFromString("fatal"), EncodingJSON, WithOutput(lco))
 	require.Nil(t, err)
 
 	logger := Logger().exiter(mockExiter{t})
@@ -299,7 +326,7 @@ func TestFatal(t *testing.T) {
 func TestPanic(t *testing.T) {
 	lco := &lineCounterOutput{}
 
-	err := Init(LevelFromString("panic"), EncodingJSON, WithOutput(lco))
+	_, err := Init(LevelFromString("panic"), EncodingJSON, WithOutput(lco))
 	require.Nil(t, err)
 
 	logger := Logger().panicker(mockPanicker{t})
@@ -343,7 +370,7 @@ func TestLevelFromString(t *testing.T) {
 }
 
 func TestCustomLogMessages(t *testing.T) {
-	err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(&testLogger{t}))
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(&testLogger{t}))
 	if err != nil {
 		t.Fatalf(err.Error())
 	}
@@ -389,8 +416,58 @@ func TestNewContext(t *testing.T) {
 	require.NotNil(t, ctx)
 }
 
+func TestContextMethods(t *testing.T) {
+	buf := &bytes.Buffer{}
+	_, err := Init(LevelFromString("debug"), EncodingJSON, WithOutput(buf))
+	require.Nil(t, err)
+
+	logger := Logger()
+
+	ctx := context.Background()
+	logger.InfoContext(ctx, "test message", slog.String("key", "val"))
+	require.Contains(t, buf.String(), "test message")
+	require.Contains(t, buf.String(), "key")
+	require.Contains(t, buf.String(), "val")
+
+	buf.Reset()
+	logger.DebugContext(ctx, "debug msg", slog.Int("n", 42))
+	require.Contains(t, buf.String(), "debug msg")
+
+	buf.Reset()
+	logger.WarnContext(ctx, "warn msg")
+	require.Contains(t, buf.String(), "warn msg")
+
+	buf.Reset()
+	logger.ErrorContext(ctx, "error msg", slog.String("err", "oops"))
+	require.Contains(t, buf.String(), "error msg")
+	require.Contains(t, buf.String(), "oops")
+}
+
+func TestSlogAccess(t *testing.T) {
+	_, err := Init(LevelFromString("info"), EncodingJSON, WithOutput(io.Discard))
+	require.Nil(t, err)
+
+	logger := Logger()
+	require.NotNil(t, logger.Slog())
+}
+
+func TestWithReplaceAttr(t *testing.T) {
+	buf := &bytes.Buffer{}
+	_, _, err := New(LevelInfo, EncodingJSON,
+		WithOutput(buf),
+		WithReplaceAttr(func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == "ts" {
+				a.Key = "timestamp"
+			}
+			return a
+		}),
+	)
+	require.Nil(t, err)
+	// just verifying it doesn't panic
+}
+
 func BenchmarkSimpleLogging(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingLogfmt,
+	_, err := Init(LevelFromString("info"), EncodingLogfmt,
 		WithOutput(io.Discard),
 	)
 	if err != nil {
@@ -409,7 +486,7 @@ func BenchmarkSimpleLogging(b *testing.B) {
 }
 
 func BenchmarkSimpleLoggingWithCaller(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingLogfmt,
+	_, err := Init(LevelFromString("info"), EncodingLogfmt,
 		WithCaller(true),
 		WithOutput(io.Discard),
 	)
@@ -429,7 +506,7 @@ func BenchmarkSimpleLoggingWithCaller(b *testing.B) {
 }
 
 func BenchmarkJsonEncoding(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingJSON, WithOutput(io.Discard))
+	_, err := Init(LevelFromString("info"), EncodingJSON, WithOutput(io.Discard))
 	if err != nil {
 		b.Fatalf("failed to set up logger: %s", err)
 	}
@@ -446,7 +523,7 @@ func BenchmarkJsonEncoding(b *testing.B) {
 }
 
 func BenchmarkIgnoredLevel(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard))
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard))
 	if err != nil {
 		b.Fatalf("failed to set up logger: %s", err)
 	}
@@ -462,7 +539,7 @@ func BenchmarkIgnoredLevel(b *testing.B) {
 }
 
 func BenchmarkWithAttributes(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard))
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard))
 	if err != nil {
 		b.Fatalf("failed to set up logger: %s", err)
 	}
@@ -478,7 +555,7 @@ func BenchmarkWithAttributes(b *testing.B) {
 }
 
 func BenchmarkSplitLevelHandler(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard), WithErrorOutput(io.Discard))
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard), WithErrorOutput(io.Discard))
 	if err != nil {
 		b.Fatalf("failed to set up logger: %s", err)
 	}
@@ -494,7 +571,7 @@ func BenchmarkSplitLevelHandler(b *testing.B) {
 }
 
 func BenchmarkSplitLevelHandlerWithCaller(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard), WithErrorOutput(io.Discard),
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard), WithErrorOutput(io.Discard),
 		WithCaller(true),
 	)
 	if err != nil {
@@ -512,7 +589,7 @@ func BenchmarkSplitLevelHandlerWithCaller(b *testing.B) {
 }
 
 func BenchmarkSplitLevelHandlerWithAttr(b *testing.B) {
-	err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard), WithErrorOutput(io.Discard))
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard), WithErrorOutput(io.Discard))
 	if err != nil {
 		b.Fatalf("failed to set up logger: %s", err)
 	}
@@ -522,6 +599,23 @@ func BenchmarkSplitLevelHandlerWithAttr(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		logger.With("leroy", "jenkins").Error("oh nooooo!")
+	}
+
+	_ = logger
+}
+
+func BenchmarkContextLogging(b *testing.B) {
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard))
+	if err != nil {
+		b.Fatalf("failed to set up logger: %s", err)
+	}
+	logger := Logger()
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		logger.InfoContext(ctx, "message", slog.String("key", "val"))
 	}
 
 	_ = logger

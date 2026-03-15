@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 )
 
@@ -20,12 +19,20 @@ type loggingConfig struct {
 	stdOutput    io.Writer
 	errsOutput   io.Writer
 	initialAttr  map[string]slog.Attr
+	replaceAttr  func(groups []string, a slog.Attr) slog.Attr
+	closers      []io.Closer
 }
 
 const (
 	initKeyName    = "name"
 	initKeyVersion = "version"
 )
+
+// ShutdownFunc is a function that releases resources held by the logger (e.g., open file handles).
+// It should be called when the logger is no longer needed.
+type ShutdownFunc func() error
+
+var noShutdown ShutdownFunc = func() error { return nil }
 
 // Option denotes a functional option for the logging configuration
 type Option func(*loggingConfig) error
@@ -64,7 +71,8 @@ const (
 // - devnull: logs will be discarded
 // - any other filepath: logs will be written to the file
 //
-// The special filepaths are case insensitive, e.g. DEVNULL works just as well
+// The special filepaths are case insensitive, e.g. DEVNULL works just as well.
+// The file will be closed when the ShutdownFunc returned by New/Init is called.
 func WithFileOutput(path string) Option {
 	return func(lc *loggingConfig) error {
 		var output io.Writer
@@ -82,6 +90,7 @@ func WithFileOutput(path string) Option {
 			if err != nil {
 				return fmt.Errorf("failed to open file: %w", err)
 			}
+			lc.closers = append(lc.closers, f)
 			output = f
 		}
 		return WithOutput(output)(lc)
@@ -113,29 +122,60 @@ func WithVersion(version string) Option {
 	}
 }
 
+// WithReplaceAttr sets a custom attribute replacement function. This is applied on top
+// of the default replacements (time key, level key, source key). It can be used to
+// customize field names or transform values.
+func WithReplaceAttr(fn func(groups []string, a slog.Attr) slog.Attr) Option {
+	return func(lc *loggingConfig) error {
+		lc.replaceAttr = fn
+		return nil
+	}
+}
+
 // globalLogger caches the *L wrapper around slog.Default() to avoid allocations
 // on every Logger() call. It is invalidated (set to nil) when Init is called.
 var globalLogger atomic.Pointer[L]
 
+// globalShutdown holds the shutdown function for the current global logger.
+var globalShutdown atomic.Pointer[ShutdownFunc]
+
 // Init initializes the global logger. The `encoding` variable sets whether content should
-// be printed for console output or in JSON (for machine consumption)
-func Init(level slog.Level, encoding Encoding, opts ...Option) error {
+// be printed for console output or in JSON (for machine consumption).
+// Returns a ShutdownFunc that should be called to release resources (e.g., close file handles).
+func Init(level slog.Level, encoding Encoding, opts ...Option) (ShutdownFunc, error) {
 	// assign configured logger to slog's default logger
-	logger, err := New(level, encoding, opts...)
+	logger, shutdown, err := New(level, encoding, opts...)
 	if err != nil {
-		return err
+		return noShutdown, err
 	}
 	slog.SetDefault(logger.l)
 
+	// close previous global logger's resources
+	if prev := globalShutdown.Load(); prev != nil {
+		_ = (*prev)()
+	}
+
 	// invalidate cached global logger so Logger() picks up the new default
 	globalLogger.Store(nil)
-	return nil
+	globalShutdown.Store(&shutdown)
+	return shutdown, nil
 }
 
-// New returns a new logger
-func New(level slog.Level, encoding Encoding, opts ...Option) (*L, error) {
+// New returns a new logger and a ShutdownFunc to release its resources
+func New(level slog.Level, encoding Encoding, opts ...Option) (*L, ShutdownFunc, error) {
 	if level == LevelUnknown {
-		return nil, fmt.Errorf("unknown log level provided: %s", level)
+		return nil, noShutdown, fmt.Errorf("unknown log level provided: %s", level)
+	}
+
+	cfg := &loggingConfig{
+		stdOutput:   os.Stdout,
+		initialAttr: make(map[string]slog.Attr),
+	}
+	for _, opt := range opts {
+		err := opt(cfg)
+		if err != nil {
+			return nil, noShutdown, err
+		}
 	}
 
 	replaceFunc := func(groups []string, a slog.Attr) slog.Attr {
@@ -170,18 +210,13 @@ func New(level slog.Level, encoding Encoding, opts ...Option) (*L, error) {
 			dir, file := filepath.Split(source.File)
 			source.File = filepath.Join(filepath.Base(dir), file)
 		}
-		return a
-	}
 
-	cfg := &loggingConfig{
-		stdOutput:   os.Stdout,
-		initialAttr: make(map[string]slog.Attr),
-	}
-	for _, opt := range opts {
-		err := opt(cfg)
-		if err != nil {
-			return nil, err
+		// apply user-provided replacement on top of defaults
+		if cfg.replaceAttr != nil {
+			a = cfg.replaceAttr(groups, a)
 		}
+
+		return a
 	}
 
 	hopts := slog.HandlerOptions{
@@ -192,7 +227,7 @@ func New(level slog.Level, encoding Encoding, opts ...Option) (*L, error) {
 
 	th, err := getHandler(cfg.stdOutput, encoding, hopts)
 	if err != nil {
-		return nil, err
+		return nil, noShutdown, err
 	}
 
 	// inject a split level handler in case the error output is defined
@@ -220,8 +255,22 @@ func New(level slog.Level, encoding Encoding, opts ...Option) (*L, error) {
 		th = &callerHandler{addSource: cfg.enableCaller, next: th}
 	}
 
+	shutdown := noShutdown
+	if len(cfg.closers) > 0 {
+		closers := cfg.closers
+		shutdown = func() error {
+			var errs []error
+			for _, c := range closers {
+				if err := c.Close(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			return errors.Join(errs...)
+		}
+	}
+
 	// return a new L logger
-	return newL(slog.New(th)), nil
+	return newL(slog.New(th)), shutdown, nil
 }
 
 func getHandler(w io.Writer, encoding Encoding, hopts slog.HandlerOptions) (th slog.Handler, err error) {
@@ -239,12 +288,12 @@ func getHandler(w io.Writer, encoding Encoding, hopts slog.HandlerOptions) (th s
 }
 
 // NewFromContext creates a new logger, deriving structured fields from the supplied context
-func NewFromContext(ctx context.Context, level slog.Level, encoding Encoding, opts ...Option) (*L, error) {
-	logger, err := New(level, encoding, opts...)
+func NewFromContext(ctx context.Context, level slog.Level, encoding Encoding, opts ...Option) (*L, ShutdownFunc, error) {
+	logger, shutdown, err := New(level, encoding, opts...)
 	if err != nil {
-		return nil, err
+		return nil, noShutdown, err
 	}
-	return fromContext(ctx, logger), nil
+	return fromContext(ctx, logger), shutdown, nil
 }
 
 // Logger returns the cached global logger wrapping slog.Default().
@@ -264,87 +313,54 @@ const (
 	fieldsKey loggerKeyType = iota
 )
 
+// loggerFields stores context-accumulated structured attributes.
+// Uses an immutable slice (copy-on-write) — no mutex needed.
 type loggerFields struct {
-	mu     *sync.RWMutex
-	fields map[string]interface{}
-}
-
-func newLoggerFields() loggerFields {
-	return loggerFields{
-		mu:     &sync.RWMutex{},
-		fields: make(map[string]interface{}),
-	}
-}
-
-func getFields(ctx context.Context) (loggerFields, bool) {
-	lf, ok := ctx.Value(fieldsKey).(loggerFields)
-	return lf, ok
+	attrs []slog.Attr
 }
 
 // WithFields returns a context that has extra fields added.
 //
-// The method is meant to be used in conjunction with WithContext that selects
+// The method is meant to be used in conjunction with FromContext that selects
 // the context-enriched logger.
 //
-// The strength of this approach is that labels set in parent context are accessible
+// The strength of this approach is that labels set in parent context are accessible.
 func WithFields(ctx context.Context, fields ...slog.Attr) context.Context {
-
-	newFields := newLoggerFields()
-
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	lf, ok := getFields(ctx)
-	if ok {
-		lf.mu.RLock()
-		copyMap(lf.fields, newFields.fields)
-		lf.mu.RUnlock()
+	var existing []slog.Attr
+	if lf, ok := ctx.Value(fieldsKey).(loggerFields); ok {
+		existing = lf.attrs
 	}
 
-	// de-duplicate fields and add any that aren't present in the fields map yet
-	for _, field := range fields {
-		// either the key doesn't exist yet or it is overwritten
-		newFields.fields[field.Key] = field
-	}
-	return context.WithValue(ctx, fieldsKey, newFields)
+	// create a new slice: copy existing + append new (copy-on-write)
+	merged := make([]slog.Attr, 0, len(existing)+len(fields))
+	merged = append(merged, existing...)
+	merged = append(merged, fields...)
+
+	return context.WithValue(ctx, fieldsKey, loggerFields{attrs: merged})
 }
 
 func fromContext(ctx context.Context, logger *L) *L {
 	if ctx == nil {
 		return logger
 	}
-	ctxLoggerFields, ok := getFields(ctx)
-	if ok {
-		var fields []interface{}
-
-		ctxLoggerFields.mu.RLock()
-
-		// construct the fields for the logger
-		keys := make([]string, len(ctxLoggerFields.fields))
-		i := 0
-		for k := range ctxLoggerFields.fields {
-			keys[i] = k
-			i++
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fields = append(fields, ctxLoggerFields.fields[k])
-		}
-		ctxLoggerFields.mu.RUnlock()
-
-		return logger.With(fields...)
+	lf, ok := ctx.Value(fieldsKey).(loggerFields)
+	if !ok || len(lf.attrs) == 0 {
+		return logger
 	}
-	return logger
+
+	// convert attrs to interface{} slice for With()
+	args := make([]interface{}, len(lf.attrs))
+	for i, attr := range lf.attrs {
+		args[i] = attr
+	}
+	return logger.With(args...)
 }
 
 // FromContext returns a global logger which has as much context set as possible
 func FromContext(ctx context.Context) *L {
 	return fromContext(ctx, Logger())
-}
-
-func copyMap(in, out map[string]interface{}) {
-	for k, v := range in {
-		out[k] = v
-	}
 }
