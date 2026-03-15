@@ -26,6 +26,7 @@ func ToKeyVals(attr slog.Attr) (kvs []attribute.KeyValue) {
 	case slog.KindBool:
 		return []attribute.KeyValue{attribute.Bool(key, val.Bool())}
 	case slog.KindDuration:
+		return []attribute.KeyValue{attribute.Float64(key, val.Duration().Seconds())}
 	case slog.KindFloat64:
 		return []attribute.KeyValue{attribute.Float64(key, val.Float64())}
 	case slog.KindInt64:

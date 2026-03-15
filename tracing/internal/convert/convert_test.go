@@ -42,6 +42,7 @@ func TestToKeyVal(t *testing.T) {
 		in       slog.Attr
 		expected []attribute.KeyValue
 	}{
+		{slog.Duration("duration", 1500 * time.Millisecond), []attribute.KeyValue{attribute.Float64("duration", 1.5)}},
 		{slog.Bool("bool", true), []attribute.KeyValue{attribute.Bool("bool", true)}},
 		{slog.Float64("float64", 1.0), []attribute.KeyValue{attribute.Float64("float64", 1.0)}},
 		{slog.Int64("int64", 1), []attribute.KeyValue{attribute.Int64("int64", 1)}},
