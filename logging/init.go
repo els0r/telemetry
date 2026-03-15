@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 type loggingConfig struct {
@@ -112,6 +113,10 @@ func WithVersion(version string) Option {
 	}
 }
 
+// globalLogger caches the *L wrapper around slog.Default() to avoid allocations
+// on every Logger() call. It is invalidated (set to nil) when Init is called.
+var globalLogger atomic.Pointer[L]
+
 // Init initializes the global logger. The `encoding` variable sets whether content should
 // be printed for console output or in JSON (for machine consumption)
 func Init(level slog.Level, encoding Encoding, opts ...Option) error {
@@ -121,6 +126,9 @@ func Init(level slog.Level, encoding Encoding, opts ...Option) error {
 		return err
 	}
 	slog.SetDefault(logger.l)
+
+	// invalidate cached global logger so Logger() picks up the new default
+	globalLogger.Store(nil)
 	return nil
 }
 
@@ -239,9 +247,15 @@ func NewFromContext(ctx context.Context, level slog.Level, encoding Encoding, op
 	return fromContext(ctx, logger), nil
 }
 
-// Logger returns a low allocation logger for performance critical sections
+// Logger returns the cached global logger wrapping slog.Default().
+// The result is cached to avoid allocations in performance-critical sections.
 func Logger() *L {
-	return newL(slog.Default())
+	if l := globalLogger.Load(); l != nil {
+		return l
+	}
+	l := newL(slog.Default())
+	globalLogger.Store(l)
+	return l
 }
 
 type loggerKeyType int
