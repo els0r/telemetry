@@ -469,6 +469,67 @@ func TestInlineAttributes(t *testing.T) {
 	require.Contains(t, buf.String(), `"duration_ms":1500`)
 }
 
+func TestException(t *testing.T) {
+	buf := &bytes.Buffer{}
+	_, err := Init(LevelFromString("debug"), EncodingJSON, WithOutput(buf))
+	require.Nil(t, err)
+
+	logger := Logger()
+
+	t.Run("basic exception", func(t *testing.T) {
+		buf.Reset()
+		testErr := fmt.Errorf("connection refused")
+		logger.Exception("db query failed", testErr, "query", "SELECT 1")
+
+		output := buf.String()
+		require.Contains(t, output, `"exception.type":"*errors.errorString"`)
+		require.Contains(t, output, `"exception.message":"connection refused"`)
+		require.Contains(t, output, `"exception.stacktrace":`)
+		require.Contains(t, output, `"query":"SELECT 1"`)
+		require.Contains(t, output, `"db query failed"`)
+	})
+
+	t.Run("custom error type", func(t *testing.T) {
+		buf.Reset()
+		testErr := &customError{code: 42, msg: "not found"}
+		logger.Exception("lookup failed", testErr)
+
+		output := buf.String()
+		require.Contains(t, output, `"exception.type":"*logging.customError"`)
+		require.Contains(t, output, `"exception.message":"not found (code 42)"`)
+	})
+
+	t.Run("exception context", func(t *testing.T) {
+		buf.Reset()
+		ctx := context.Background()
+		testErr := fmt.Errorf("timeout")
+		logger.ExceptionContext(ctx, "request failed", testErr, slog.String("endpoint", "/api"))
+
+		output := buf.String()
+		require.Contains(t, output, `"exception.type":"*errors.errorString"`)
+		require.Contains(t, output, `"exception.message":"timeout"`)
+		require.Contains(t, output, `"endpoint":"/api"`)
+	})
+
+	t.Run("level filtering", func(t *testing.T) {
+		lco := &lineCounterOutput{}
+		_, err := Init(LevelFromString("fatal"), EncodingJSON, WithOutput(lco))
+		require.Nil(t, err)
+
+		Logger().Exception("should not appear", fmt.Errorf("hidden"))
+		require.Equal(t, 0, lco.lines)
+	})
+}
+
+type customError struct {
+	code int
+	msg  string
+}
+
+func (e *customError) Error() string {
+	return fmt.Sprintf("%s (code %d)", e.msg, e.code)
+}
+
 func TestSlogAccess(t *testing.T) {
 	_, err := Init(LevelFromString("info"), EncodingJSON, WithOutput(io.Discard))
 	require.Nil(t, err)

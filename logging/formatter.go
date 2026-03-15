@@ -5,7 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"reflect"
+	"runtime"
 	"time"
+)
+
+// OTel semantic convention attribute keys for exceptions.
+// See https://opentelemetry.io/docs/specs/semconv/exceptions/exceptions-logs/
+const (
+	ExceptionTypeKey       = "exception.type"
+	ExceptionMessageKey    = "exception.message"
+	ExceptionStacktraceKey = "exception.stacktrace"
 )
 
 type formatter struct {
@@ -167,6 +177,52 @@ func (f *formatter) ErrorContext(ctx context.Context, msg string, attrs ...slog.
 		return
 	}
 	r := slog.NewRecord(time.Now(), slog.LevelError, msg, 0)
+	r.AddAttrs(attrs...)
+	_ = f.l.Handler().Handle(ctx, r)
+}
+
+// exceptionAttrs returns OTel semantic convention attributes for an exception.
+func exceptionAttrs(err error) []slog.Attr {
+	attrs := make([]slog.Attr, 0, 3)
+	attrs = append(attrs,
+		slog.String(ExceptionTypeKey, reflect.TypeOf(err).String()),
+		slog.String(ExceptionMessageKey, err.Error()),
+	)
+
+	// capture stack trace (skip 3 frames: runtime.Stack, exceptionAttrs, Exception/ExceptionContext)
+	buf := make([]byte, 4096)
+	n := runtime.Stack(buf, false)
+	attrs = append(attrs, slog.String(ExceptionStacktraceKey, string(buf[:n])))
+
+	return attrs
+}
+
+// Exception emits an error-level log message with OTel semantic convention
+// exception attributes (exception.type, exception.message, exception.stacktrace).
+// Additional args follow slog convention: alternating key-value pairs or slog.Attr values.
+//
+//	logger.Exception("db query failed", err, "query", sqlStr)
+//
+// See https://opentelemetry.io/docs/specs/semconv/exceptions/exceptions-logs/
+func (f *formatter) Exception(msg string, err error, args ...any) {
+	if !f.l.Enabled(enableCtx, slog.LevelError) {
+		return
+	}
+	r := slog.NewRecord(time.Now(), slog.LevelError, msg, 0)
+	r.AddAttrs(exceptionAttrs(err)...)
+	r.Add(args...)
+	_ = f.l.Handler().Handle(enableCtx, r)
+}
+
+// ExceptionContext emits an error-level log message with OTel exception attributes,
+// passing ctx through to the handler chain. See Exception for details and InfoContext
+// for the context-passing rationale.
+func (f *formatter) ExceptionContext(ctx context.Context, msg string, err error, attrs ...slog.Attr) {
+	if !f.l.Enabled(ctx, slog.LevelError) {
+		return
+	}
+	r := slog.NewRecord(time.Now(), slog.LevelError, msg, 0)
+	r.AddAttrs(exceptionAttrs(err)...)
 	r.AddAttrs(attrs...)
 	_ = f.l.Handler().Handle(ctx, r)
 }
