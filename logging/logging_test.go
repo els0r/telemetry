@@ -180,7 +180,7 @@ func TestCaller(t *testing.T) {
 		t.Fatal(err.Error())
 	}
 	logger := Logger()
-	logger.Error(errors.New("testing plain error caller"))
+	logger.Error("testing plain error caller", "err", errors.New("testing plain error caller"))
 
 	// shouldn't show up
 	logger.Info("the things you do for love")
@@ -443,6 +443,32 @@ func TestContextMethods(t *testing.T) {
 	require.Contains(t, buf.String(), "oops")
 }
 
+func TestInlineAttributes(t *testing.T) {
+	buf := &bytes.Buffer{}
+	_, err := Init(LevelFromString("debug"), EncodingJSON, WithOutput(buf))
+	require.Nil(t, err)
+
+	logger := Logger()
+
+	// slog-style key-value pairs
+	logger.Info("request handled", "method", "GET", "status", 200)
+	require.Contains(t, buf.String(), `"method":"GET"`)
+	require.Contains(t, buf.String(), `"status":200`)
+
+	buf.Reset()
+
+	// slog.Attr values
+	logger.Debug("cache hit", slog.String("key", "users:1"), slog.Duration("ttl", 5e9))
+	require.Contains(t, buf.String(), `"key":"users:1"`)
+
+	buf.Reset()
+
+	// mixed with .With() — both should appear
+	logger.With("service", "api").Warn("slow query", "duration_ms", 1500)
+	require.Contains(t, buf.String(), `"service":"api"`)
+	require.Contains(t, buf.String(), `"duration_ms":1500`)
+}
+
 func TestSlogAccess(t *testing.T) {
 	_, err := Init(LevelFromString("info"), EncodingJSON, WithOutput(io.Discard))
 	require.Nil(t, err)
@@ -599,6 +625,22 @@ func BenchmarkSplitLevelHandlerWithAttr(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		logger.With("leroy", "jenkins").Error("oh nooooo!")
+	}
+
+	_ = logger
+}
+
+func BenchmarkInlineAttributes(b *testing.B) {
+	_, err := Init(LevelFromString("info"), EncodingLogfmt, WithOutput(io.Discard))
+	if err != nil {
+		b.Fatalf("failed to set up logger: %s", err)
+	}
+	logger := Logger()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		logger.Info("request handled", "method", "GET", "status", 200)
 	}
 
 	_ = logger
