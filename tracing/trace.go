@@ -2,8 +2,6 @@
 //
 // It uses the [otel](https://opentelemetry.io/docs/instrumentation/go/getting-started/) tracing library, connecting
 // to an OpenTelemetry collector.
-//
-// The package relies on, and is meant to be used in conjunction with the observability package
 package tracing
 
 import (
@@ -11,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -22,6 +19,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -30,7 +28,10 @@ const (
 )
 
 type tracingConfig struct {
-	exporter sdktrace.SpanExporter
+	exporter    sdktrace.SpanExporter
+	sampler     sdktrace.Sampler
+	resource    *resource.Resource
+	credentials credentials.TransportCredentials
 }
 
 // Option allows to configure the tracing setup
@@ -41,28 +42,31 @@ var (
 	errorNoSpanExporter = errors.New("no span exporter set")
 )
 
-// WithGRPCExporter sets up an exporter using a gRPC connection to the trace collector
-func WithGRPCExporter(ctx context.Context, collectorEndpoint string) Option {
+// WithGRPCExporter sets up an exporter using a gRPC connection to the trace collector.
+// The connection is established lazily — the application will not block during initialization
+// if the collector is unreachable. Use WithTransportCredentials to configure TLS.
+func WithGRPCExporter(_ context.Context, collectorEndpoint string) Option {
 	return func(tc *tracingConfig) error {
 		if collectorEndpoint == "" {
 			return errorNoCollector
 		}
-		// If the OpenTelemetry Collector is running on a local cluster (minikube or
-		// microk8s), it should be accessible through the NodePort service at the
-		// `localhost:30080` endpoint. Otherwise, replace `localhost` with the
-		// endpoint of your cluster. If you run the app inside k8s, then you can
-		// probably connect directly to the service through dns.
-		dialCtx, cancel := context.WithTimeout(ctx, time.Second)
-		defer cancel()
-		conn, err := grpc.DialContext(dialCtx, collectorEndpoint,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithBlock(),
+
+		creds := tc.credentials
+		if creds == nil {
+			creds = insecure.NewCredentials()
+		}
+
+		// Use grpc.NewClient for lazy, non-blocking connection establishment.
+		// The deprecated grpc.DialContext+WithBlock pattern was removed to avoid
+		// blocking application startup when the collector is unreachable.
+		conn, err := grpc.NewClient(collectorEndpoint,
+			grpc.WithTransportCredentials(creds),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to create gRPC connection to collector: %w", err)
+			return fmt.Errorf("failed to create gRPC client for collector: %w", err)
 		}
-		// Set up a trace exporter
-		traceExporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
+
+		traceExporter, err := otlptracegrpc.New(context.Background(), otlptracegrpc.WithGRPCConn(conn))
 		if err != nil {
 			return fmt.Errorf("failed to create gRPC trace exporter: %w", err)
 		}
@@ -71,10 +75,20 @@ func WithGRPCExporter(ctx context.Context, collectorEndpoint string) Option {
 	}
 }
 
+// WithTransportCredentials sets the transport credentials for gRPC connections.
+// Must be called before WithGRPCExporter to take effect. If not set, insecure
+// credentials are used by default.
+func WithTransportCredentials(creds credentials.TransportCredentials) Option {
+	return func(tc *tracingConfig) error {
+		tc.credentials = creds
+		return nil
+	}
+}
+
 // WithStdoutTraceExporter sets the exporter to write to stdout. It's not recommended to
-// use this exporter in production and only for testing and validation
+// use this exporter in production and only for testing and validation.
 //
-// A writer can be optionally provided. The default case is stdout
+// A writer can be optionally provided. The default case is stdout.
 func WithStdoutTraceExporter(prettyPrint bool, w ...io.Writer) Option { //revive:disable-line
 	return func(tc *tracingConfig) error {
 		var opts []stdouttrace.Option
@@ -85,7 +99,6 @@ func WithStdoutTraceExporter(prettyPrint bool, w ...io.Writer) Option { //revive
 			opts = append(opts, stdouttrace.WithPrettyPrint())
 		}
 		exp, err := stdouttrace.New(opts...)
-
 		if err != nil {
 			return fmt.Errorf("failed to create stdout trace exporter: %w", err)
 		}
@@ -102,12 +115,27 @@ func WithSpanExporter(exporter sdktrace.SpanExporter) Option {
 	}
 }
 
+// WithSampler sets the trace sampler. The default is ParentBased(AlwaysSample()),
+// which respects the parent span's sampling decision and samples all root spans.
+func WithSampler(sampler sdktrace.Sampler) Option {
+	return func(tc *tracingConfig) error {
+		tc.sampler = sampler
+		return nil
+	}
+}
+
+// WithResource sets the resource describing the entity producing telemetry.
+// Use this to set service.name, service.version, deployment.environment, etc.
+// If not set, resource.Default() is used which auto-detects from environment variables.
+func WithResource(r *resource.Resource) Option {
+	return func(tc *tracingConfig) error {
+		tc.resource = r
+		return nil
+	}
+}
+
 // Init initializes the tracer provider. The function is meant to be called once upon
-// program setup. The reason for providing the serviceName explicitly is so that
-// this package does not depend on the observability package to be intitialized
-//
-// Best practice is to use the serviceName from the package, having previously called
-// `observability.Init`.
+// program setup.
 func Init(opts ...Option) (ShutdownFunc, error) {
 	tracerProvider, err := NewTracerProvider(opts...)
 	if err != nil {
@@ -125,9 +153,9 @@ func Init(opts ...Option) (ShutdownFunc, error) {
 	return tracerProvider.Shutdown, nil
 }
 
-// NewTracerProvider creates a new tracer provider using the provided service name. The options
-// can and should be used to supply a span exporter. There is no default set on purpose, since
-// the choice of exporter highly depends on the environment the application is deployed in
+// NewTracerProvider creates a new tracer provider. The options can and should be used
+// to supply a span exporter. There is no default set on purpose, since the choice of
+// exporter highly depends on the environment the application is deployed in.
 func NewTracerProvider(opts ...Option) (tp *sdktrace.TracerProvider, err error) {
 	// apply options
 	tracingCfg := &tracingConfig{}
@@ -142,13 +170,24 @@ func NewTracerProvider(opts ...Option) (tp *sdktrace.TracerProvider, err error) 
 		return nil, errorNoSpanExporter
 	}
 
+	// default sampler: ParentBased(AlwaysSample) — respects parent sampling decisions
+	sampler := tracingCfg.sampler
+	if sampler == nil {
+		sampler = sdktrace.ParentBased(sdktrace.AlwaysSample())
+	}
+
+	// default resource: auto-detect from environment
+	res := tracingCfg.resource
+	if res == nil {
+		res = resource.Default()
+	}
+
 	// Register the trace exporter with a TracerProvider, using a batch
 	// span processor to aggregate spans before export.
 	bsp := sdktrace.NewBatchSpanProcessor(exporter)
 	tp = sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-		// this will run all standard detectors to add service name and version to the resource
-		sdktrace.WithResource(resource.Default()),
+		sdktrace.WithSampler(sampler),
+		sdktrace.WithResource(res),
 		sdktrace.WithSpanProcessor(bsp),
 	)
 	return tp, nil
