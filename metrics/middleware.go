@@ -15,11 +15,10 @@ var defaultMetricPath = "/metrics"
 // Prometheus contains the metrics gathered by the instance and its path. It's been stripped and adapted from
 // https://github.com/zsais/go-gin-prometheus/blob/master/middleware.go, the main reason being the lack of support
 // for histogram buckets.
-//
-// For histograms, it uses the experimental NativeHistograms feature
 type Prometheus struct {
-	reqCnt       *prometheus.CounterVec
-	reqSz, resSz prometheus.Summary
+	reqCnt *prometheus.CounterVec
+	reqSz  *prometheus.HistogramVec
+	resSz  *prometheus.HistogramVec
 
 	// request duration can be configured
 	reqDur         *prometheus.HistogramVec
@@ -28,9 +27,12 @@ type Prometheus struct {
 
 	additionalMetrics []prometheus.Collector
 
+	registry *prometheus.Registry
+
 	metricsPath string
 
-	// gin.Context string to use as a prometheus URL label
+	// gin.Context key to use as the "path" label value.
+	// If set, the value from c.Get(pathLabelFromContext) is used instead of c.Request.URL.Path.
 	pathLabelFromContext string
 }
 
@@ -40,7 +42,7 @@ func (p *Prometheus) WithMetricsPath(path string) *Prometheus {
 	return p
 }
 
-// WithNativeHistograms enables the use of the native prometheus histogram. This is still an experimental feature
+// WithNativeHistograms enables the use of the native prometheus histogram. This is still an experimental feature.
 func (p *Prometheus) WithNativeHistograms(enabled bool) *Prometheus { //revive:disable-line
 	if enabled {
 		// Experimental: see documentation on NewHistogram for buckets explanation
@@ -50,19 +52,37 @@ func (p *Prometheus) WithNativeHistograms(enabled bool) *Prometheus { //revive:d
 	return p
 }
 
-// WithRequestDurationBuckets overrides the default buckets for the request duration histogram
+// WithRequestDurationBuckets overrides the default buckets for the request duration histogram.
 func (p *Prometheus) WithRequestDurationBuckets(buckets []float64) *Prometheus {
 	p.reqDurHistOpts.Buckets = buckets
 	p.reqDur = prometheus.NewHistogramVec(*p.reqDurHistOpts, p.reqDurLabels)
 	return p
 }
 
+// WithPathLabelFromContext sets a gin.Context key whose value will be used as the "path"
+// label instead of c.Request.URL.Path. This is useful for grouping routes with path parameters.
+func (p *Prometheus) WithPathLabelFromContext(key string) *Prometheus {
+	p.pathLabelFromContext = key
+	return p
+}
+
 // NewPrometheus generates a new set of metrics with a certain subsystem name. If additionalMetrics is supplied,
 // it will register those as well. The `With...` modifiers are meant to be called _before_ they are used/registered
-// with gin. Best idea is to call them immediately after NewPrometheus()
-func NewPrometheus(serviceName, subsystem string, additionalMetrics ...prometheus.Collector) *Prometheus {
+// with gin. Best idea is to call them immediately after NewPrometheus().
+//
+// If registry is nil, a new prometheus.Registry is created. Pass prometheus.DefaultRegisterer's
+// underlying *prometheus.Registry to use the global registry (not recommended for testing).
+func NewPrometheus(serviceName, subsystem string, registry *prometheus.Registry, additionalMetrics ...prometheus.Collector) *Prometheus {
+	if registry == nil {
+		registry = prometheus.NewRegistry()
+		// register standard Go and process collectors on custom registries
+		registry.MustRegister(prometheus.NewGoCollector())
+		registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	}
+
 	p := &Prometheus{
 		metricsPath: defaultMetricPath,
+		registry:    registry,
 		// request duration metric configuration
 		reqDurHistOpts: &prometheus.HistogramOpts{
 			Namespace: serviceName,
@@ -77,14 +97,14 @@ func NewPrometheus(serviceName, subsystem string, additionalMetrics ...prometheu
 	return p
 }
 
-// SetMetricsPath sets the metrics path in the gin.Engine. To control the value of the path, use (*Prometheus).WithMetricsPath
+// SetMetricsPath sets the metrics path in the gin.Engine. To control the value of the path, use (*Prometheus).WithMetricsPath.
 func (p *Prometheus) SetMetricsPath(e *gin.Engine) {
-	e.GET(p.metricsPath, prometheusHandler())
+	e.GET(p.metricsPath, p.prometheusHandler())
 }
 
-// SetMetricsPathWithAuth set metrics paths with authentication in the gin.Engine
+// SetMetricsPathWithAuth set metrics paths with authentication in the gin.Engine.
 func (p *Prometheus) SetMetricsPathWithAuth(e *gin.Engine, accounts gin.Accounts) {
-	e.GET(p.metricsPath, gin.BasicAuth(accounts), prometheusHandler())
+	e.GET(p.metricsPath, gin.BasicAuth(accounts), p.prometheusHandler())
 }
 
 func (p *Prometheus) newMetrics(serviceName, subsystem string, additionalMetrics ...prometheus.Collector) {
@@ -105,28 +125,30 @@ func (p *Prometheus) newMetrics(serviceName, subsystem string, additionalMetrics
 		*p.reqDurHistOpts,
 		p.reqDurLabels,
 	)
-	p.reqSz = prometheus.NewSummary(
-		prometheus.SummaryOpts{
+	p.reqSz = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
 			Namespace: serviceName,
 			Subsystem: subsystem,
 			Name:      "request_size_bytes",
 			Help:      "HTTP request sizes in bytes",
+			Buckets:   prometheus.ExponentialBuckets(100, 10, 7), // 100B to 100MB
 		},
+		[]string{"code", "method"},
 	)
-	p.resSz = prometheus.NewSummary(
-		prometheus.SummaryOpts{
+	p.resSz = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
 			Namespace: serviceName,
 			Subsystem: subsystem,
 			Name:      "response_size_bytes",
 			Help:      "HTTP response sizes in bytes",
+			Buckets:   prometheus.ExponentialBuckets(100, 10, 7), // 100B to 100MB
 		},
+		[]string{"code", "method"},
 	)
 	p.additionalMetrics = additionalMetrics
 }
 
 func (p *Prometheus) registerMetrics() {
-	// register the metrics with prometheus. We use MustRegister to ensure that metrics registration
-	// is handled properly (leading to a panic otherwise)
 	var toRegister []prometheus.Collector
 	toRegister = append(toRegister,
 		p.reqCnt,
@@ -136,13 +158,13 @@ func (p *Prometheus) registerMetrics() {
 	toRegister = append(toRegister, p.additionalMetrics...)
 
 	for _, collector := range toRegister {
-		prometheus.MustRegister(collector)
+		p.registry.MustRegister(collector)
 	}
 }
 
 func (p *Prometheus) use(e *gin.Engine) {
 	p.registerMetrics()
-	e.Use(p.HandlerFunc())
+	e.Use(p.GinHandlerFunc())
 }
 
 // Register adds the middleware to a gin engine.
@@ -157,8 +179,35 @@ func (p *Prometheus) RegisterWithAuth(e *gin.Engine, accounts gin.Accounts) {
 	p.SetMetricsPathWithAuth(e, accounts)
 }
 
-// HandlerFunc defines handler function for middleware
-func (p *Prometheus) HandlerFunc() gin.HandlerFunc {
+// HandlerFunc returns a net/http middleware that records metrics.
+// This is the framework-agnostic version of GinHandlerFunc.
+func (p *Prometheus) HandlerFunc(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == p.metricsPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		start := time.Now()
+		reqSz := computeApproximateRequestSize(r)
+
+		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+
+		status := strconv.Itoa(rw.status)
+		elapsed := float64(time.Since(start)) / float64(time.Second)
+		resSz := float64(rw.size)
+
+		path := r.URL.Path
+		p.reqDur.WithLabelValues(status, r.Method, path).Observe(elapsed)
+		p.reqCnt.WithLabelValues(r.Host, r.URL.Path, status, r.Method, path).Inc()
+		p.reqSz.WithLabelValues(status, r.Method).Observe(float64(reqSz))
+		p.resSz.WithLabelValues(status, r.Method).Observe(resSz)
+	})
+}
+
+// GinHandlerFunc defines handler function for gin middleware.
+func (p *Prometheus) GinHandlerFunc() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.URL.Path == p.metricsPath {
 			c.Next()
@@ -177,23 +226,49 @@ func (p *Prometheus) HandlerFunc() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		if len(p.pathLabelFromContext) > 0 {
 			pp, found := c.Get(p.pathLabelFromContext)
-			if !found {
-				pp = "unknown"
+			if found {
+				if s, ok := pp.(string); ok {
+					path = s
+				}
 			}
-			path = pp.(string)
 		}
 		p.reqDur.WithLabelValues(status, c.Request.Method, path).Observe(elapsed)
 		p.reqCnt.WithLabelValues(c.Request.Host, c.HandlerName(), status, c.Request.Method, path).Inc()
-		p.reqSz.Observe(float64(reqSz))
-		p.resSz.Observe(resSz)
+		p.reqSz.WithLabelValues(status, c.Request.Method).Observe(float64(reqSz))
+		p.resSz.WithLabelValues(status, c.Request.Method).Observe(resSz)
 	}
 }
 
-func prometheusHandler() gin.HandlerFunc {
-	h := promhttp.Handler()
+// MetricsHandler returns an http.Handler that serves the metrics endpoint.
+// Use this for net/http setups: http.Handle("/metrics", p.MetricsHandler())
+func (p *Prometheus) MetricsHandler() http.Handler {
+	return promhttp.HandlerFor(p.registry, promhttp.HandlerOpts{})
+}
+
+func (p *Prometheus) prometheusHandler() gin.HandlerFunc {
+	h := promhttp.HandlerFor(p.registry, promhttp.HandlerOpts{})
 	return func(c *gin.Context) {
 		h.ServeHTTP(c.Writer, c.Request)
 	}
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code and response size
+// for the net/http middleware.
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+	size   int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.status = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	n, err := rw.ResponseWriter.Write(b)
+	rw.size += n
+	return n, err
 }
 
 // From https://github.com/DanielHeckrath/gin-prometheus/blob/master/gin_prometheus.go
