@@ -148,7 +148,9 @@ func (p *Prometheus) newMetrics(serviceName, subsystem string, additionalMetrics
 	p.additionalMetrics = additionalMetrics
 }
 
-func (p *Prometheus) registerMetrics() {
+// RegisterMetrics registers all metric collectors with the prometheus registry.
+// Call this before serving MetricsHandler() in non-gin (net/http) setups.
+func (p *Prometheus) RegisterMetrics() {
 	var toRegister []prometheus.Collector
 	toRegister = append(toRegister,
 		p.reqCnt,
@@ -163,7 +165,7 @@ func (p *Prometheus) registerMetrics() {
 }
 
 func (p *Prometheus) use(e *gin.Engine) {
-	p.registerMetrics()
+	p.RegisterMetrics()
 	e.Use(p.GinHandlerFunc())
 }
 
